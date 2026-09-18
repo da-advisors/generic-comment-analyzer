@@ -623,6 +623,62 @@ def find_political_verify_comments(comments: List[Dict[str, Any]], config: dict)
     return candidates
 
 
+_ANTHROPIC_CLIENT = None
+
+
+def _is_anthropic(model: str) -> bool:
+    return (model or '').startswith('anthropic/')
+
+
+def _complete(model, system_prompt, user_prompt, response_model):
+    """One structured-output call, routed by provider.
+
+    Anthropic goes through its own SDK rather than LiteLLM. LiteLLM's Anthropic
+    `response_format` path returns schema-valid JSON in which every free-text
+    field is an empty string -- enums populate, prose does not. Here that would
+    silently blank the `reasoning` field on every verification, which is the
+    whole audit trail for an overturned classification: the verdict would stand
+    with nothing recorded about why. The same schema sent to the SDK as a forced
+    tool fills it.
+    """
+    global _ANTHROPIC_CLIENT
+
+    if not _is_anthropic(model):
+        resp = litellm.completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format=response_model,
+            temperature=0.0,
+        )
+        return json.loads(resp.choices[0].message.content)
+
+    import anthropic
+    if _ANTHROPIC_CLIENT is None:
+        _ANTHROPIC_CLIENT = anthropic.Anthropic()
+
+    tool = {
+        'name': 'record_verification',
+        'description': 'Record the verification result.',
+        'input_schema': response_model.model_json_schema(),
+    }
+    msg = _ANTHROPIC_CLIENT.messages.create(
+        model=model.split('/', 1)[1],
+        max_tokens=1024,
+        system=system_prompt,
+        tools=[tool],
+        tool_choice={'type': 'tool', 'name': 'record_verification'},
+        messages=[{'role': 'user', 'content': user_prompt}],
+    )
+    block = next((b for b in msg.content
+                  if b.type == 'tool_use' and b.name == 'record_verification'), None)
+    if block is None:
+        raise ValueError(f"no tool_use block returned (stop_reason={msg.stop_reason})")
+    return dict(block.input)
+
+
 def verify_single_political(model, comment_text, affiliation, quote, submitter=''):
     """Verify a single comment's political affiliation."""
     prompt = POLITICAL_VERIFICATION_PROMPT.format(
@@ -636,16 +692,8 @@ def verify_single_political(model, comment_text, affiliation, quote, submitter='
     parts.append(comment_text)
     combined = "\n".join(parts)
 
-    resp = litellm.completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Verify the political affiliation for this comment:\n\n{combined}"},
-        ],
-        response_format=PoliticalVerification,
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content)
+    return _complete(model, prompt, f"Verify the political affiliation for this comment:\n\n{combined}",
+                     PoliticalVerification)
 
 
 def verify_single_state(model, comment_text, state, quote, submitter=''):
@@ -656,16 +704,8 @@ def verify_single_state(model, comment_text, state, quote, submitter=''):
         submitter=submitter,
     )
 
-    resp = litellm.completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Verify the state classification for this comment:\n\n{comment_text}"},
-        ],
-        response_format=StateVerification,
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content)
+    return _complete(model, prompt, f"Verify the state classification for this comment:\n\n{comment_text}",
+                     StateVerification)
 
 
 def verify_single_stance(model, comment_text, submitter='', organization=''):
@@ -678,16 +718,8 @@ def verify_single_stance(model, comment_text, submitter='', organization=''):
     parts.append(comment_text)
     combined = "\n".join(parts)
 
-    resp = litellm.completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": STANCE_VERIFICATION_PROMPT},
-            {"role": "user", "content": f"Classify this comment:\n\n{combined}"},
-        ],
-        response_format=STANCE_VERIFICATION_MODEL,
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content)
+    return _complete(model, STANCE_VERIFICATION_PROMPT, f"Classify this comment:\n\n{combined}",
+                     STANCE_VERIFICATION_MODEL)
 
 
 def verify_single_entity(model, comment_text, entity_type, entity_name,
@@ -706,16 +738,8 @@ def verify_single_entity(model, comment_text, entity_type, entity_name,
         entity_name=entity_name,
     )
 
-    resp = litellm.completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Verify the entity type classification for this comment:\n\n{combined}"},
-        ],
-        response_format=ENTITY_VERIFICATION_MODEL,
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content)
+    return _complete(model, prompt, f"Verify the entity type classification for this comment:\n\n{combined}",
+                     ENTITY_VERIFICATION_MODEL)
 
 
 # Head+tail cap for the cosigner-span prompt. Unlike the other verify_single_*
@@ -745,16 +769,8 @@ def verify_single_cosigner_span(model, comment_text, submitter='', organization=
     parts.append(comment_text)
     combined = "\n".join(parts)
 
-    resp = litellm.completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": COSIGNER_SPAN_PROMPT},
-            {"role": "user", "content": f"Analyze this comment for joint/coalition signers:\n\n{combined}"},
-        ],
-        response_format=COSIGNER_SPAN_MODEL,
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content)
+    return _complete(model, COSIGNER_SPAN_PROMPT, f"Analyze this comment for joint/coalition signers:\n\n{combined}",
+                     COSIGNER_SPAN_MODEL)
 
 
 def verify_stances(comments: List[Dict[str, Any]], model: str = None,
@@ -762,13 +778,18 @@ def verify_stances(comments: List[Dict[str, Any]], model: str = None,
     """Run second-pass verification on stances and entity types. Modifies comments in place."""
     _load_prompts()
 
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        logger.warning("No OPENAI_API_KEY — skipping verification")
-        return comments
-
     config = load_second_pass_config()
-    model = model or config.get('model', 'gpt-5.4-mini')
+    model = model or os.getenv('VERIFY_MODEL') or config.get('model', 'gpt-5.4-mini')
+
+    # Check the credentials the CONFIGURED model actually needs. Gating on
+    # OPENAI_API_KEY regardless of provider meant an Anthropic- or Gemini-configured
+    # second pass was skipped behind a warning naming the wrong key -- and since
+    # skipping returns the comments untouched, the run still reported success with
+    # no verification performed.
+    needed = 'ANTHROPIC_API_KEY' if _is_anthropic(model) else 'OPENAI_API_KEY'
+    if not os.getenv(needed):
+        logger.warning(f"No {needed} — skipping verification for model {model}")
+        return comments
     max_workers = max_workers or config.get('max_workers', 8)
 
     # --- Stance verification ---
