@@ -515,7 +515,10 @@ def validate_analysis(analysis: dict, comment_text: str, submitter: str = '', or
     return analysis
 
 
-FALLBACK_MODEL = 'gpt-5.4-mini'  # stronger OpenAI model retried when the primary model errors
+FALLBACK_MODEL = os.getenv('LLM_FALLBACK_MODEL', 'gpt-5.4-mini')  # stronger model retried
+# when the primary errors. Must come from the SAME provider as the primary model:
+# an Anthropic run has no OpenAI credentials, so an OpenAI fallback fails on every
+# retry and turns one transient error into a recorded failure.
 
 # Errors that mean "the account cannot call the API right now", as opposed to a
 # problem with this particular comment. These are worth stopping the run over:
@@ -1368,7 +1371,11 @@ def main():
     parser.add_argument('--csv', type=str, default=None, help='Path to comments CSV file (default: source.csv in the regulation dir)')
     parser.add_argument('--output', type=str, default=None, help='Output Parquet file (default: full_run.parquet in the regulation dir)')
     parser.add_argument('--sample', type=int, help='Process only N random comments for testing')
-    parser.add_argument('--model', type=str, default='gpt-5.4-nano', help='LLM model to use (LiteLLM model string, e.g. gpt-4o-mini)')
+    parser.add_argument('--model', type=str, default=os.getenv('LLM_MODEL', 'gpt-5.4-nano'),
+                        help='LLM model to use (LiteLLM model string, e.g. gpt-4o-mini or '
+                             'anthropic/claude-sonnet-5). Defaults to $LLM_MODEL, which the '
+                             'analyzer already documents as the way to set the model; a hardcoded '
+                             'default here silently overrode it.')
     parser.add_argument('--truncate', type=int, default=50000, help='Truncate comment text to N characters before LLM analysis (default: 50000)')
     parser.add_argument('--to-database', action='store_true', help='Store results in PostgreSQL database (requires DATABASE_URL in .env)')
     parser.add_argument('--workers', type=int, default=8, help='Number of parallel workers for LLM calls (default: 8)')

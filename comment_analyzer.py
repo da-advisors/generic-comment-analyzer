@@ -250,10 +250,23 @@ class CommentAnalyzer:
         logger.info(f"Using {len(self.stance_options)} stance options")
         logger.info(f"Using {len(self.entity_types)} entity types")
 
-        # Ensure API key is available
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
+        # Ensure API key is available. LiteLLM routes by model prefix, so an
+        # `anthropic/...` model needs ANTHROPIC_API_KEY and never reads the
+        # OpenAI one — requiring OPENAI_API_KEY unconditionally would block a
+        # correctly configured Anthropic run.
+        if self.is_anthropic:
+            if not os.getenv('ANTHROPIC_API_KEY'):
+                raise ValueError("ANTHROPIC_API_KEY not found in environment variables or .env file")
+        elif not os.getenv('OPENAI_API_KEY'):
             raise ValueError("OPENAI_API_KEY not found in environment variables or .env file")
+
+    @property
+    def is_anthropic(self) -> bool:
+        return (self.model or '').startswith('anthropic/')
+
+    # Created lazily on first Anthropic call and reused; the SDK client is
+    # thread-safe, and the pipeline builds one analyzer per worker thread.
+    _anthropic_client = None
 
     def _load_config(self, config_file: str) -> Dict[str, Any]:
         """Load configuration from YAML or JSON file."""
@@ -353,6 +366,48 @@ class CommentAnalyzer:
 
 Analyze objectively and avoid inserting personal opinions or biases."""
 
+    def _anthropic_call(self, user_content: str) -> Dict[str, Any]:
+        """Call Claude directly rather than through LiteLLM's response_format path.
+
+        LiteLLM's Anthropic adapter accepts `response_format=<pydantic model>` and
+        returns schema-valid JSON, but every free-text field comes back as an empty
+        string — only the enums populate. Measured on this config: entity_name,
+        state_identified, state_quote, key_quote and rationale were all "" on every
+        call, which silently guts the quote evidence the report is built on. The
+        same schema passed to the Anthropic SDK as a forced tool fills all of them.
+
+        Anthropic is therefore called natively. Only the transport differs; the
+        schema and system prompt are the same objects the OpenAI path uses, so the
+        two produce the same shape.
+        """
+        import anthropic
+
+        if self._anthropic_client is None:
+            self._anthropic_client = anthropic.Anthropic()
+
+        tool = {
+            'name': 'record_analysis',
+            'description': 'Record the structured analysis of this public comment.',
+            'input_schema': self.result_model.model_json_schema(),
+        }
+        # The model id carries LiteLLM's `anthropic/` routing prefix; the SDK wants it bare.
+        model_id = self.model.split('/', 1)[1]
+
+        msg = self._anthropic_client.messages.create(
+            model=model_id,
+            max_tokens=2048,
+            system=self.get_system_prompt(),
+            tools=[tool],
+            tool_choice={'type': 'tool', 'name': 'record_analysis'},
+            messages=[{'role': 'user', 'content': user_content}],
+            timeout=self.timeout_seconds,
+        )
+        block = next((b for b in msg.content
+                      if b.type == 'tool_use' and b.name == 'record_analysis'), None)
+        if block is None:
+            raise ValueError(f"no tool_use block returned (stop_reason={msg.stop_reason})")
+        return dict(block.input)
+
     def analyze_with_timeout(self, comment_text, comment_id=None, organization=None, submitter=None):
         """Analyze a comment with timeout protection"""
         identifier = f" (ID: {comment_id})" if comment_id else ""
@@ -369,13 +424,19 @@ Analyze objectively and avoid inserting personal opinions or biases."""
         # Create a thread-safe container for the result
         result_container = {'result': None, 'error': None}
 
+        user_content = f"Analyze the following public comment{identifier}:\n\n{combined_text}"
+
         def api_call():
             try:
+                if self.is_anthropic:
+                    result_container['result'] = self._anthropic_call(user_content)
+                    return
+
                 response = litellm.completion(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": self.get_system_prompt()},
-                        {"role": "user", "content": f"Analyze the following public comment{identifier}:\n\n{combined_text}"},
+                        {"role": "user", "content": user_content},
                     ],
                     response_format=self.result_model,
                     temperature=0.0,
