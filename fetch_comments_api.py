@@ -423,10 +423,19 @@ def main():
     # Append as we go rather than accumulating and writing at the end: when the
     # hourly budget runs out mid-run we keep every comment fetched so far
     # instead of throwing the whole run away.
+    # Bootstrapping an empty docket (--full-list, no CSV yet) has to write the
+    # header itself. Appending without one produced a headerless file whose first
+    # data row silently became the header for every downstream csv.DictReader —
+    # every comment body then read as empty, and the pipeline would have analyzed
+    # 977 blank strings without complaining.
+    needs_header = not os.path.exists(args.csv) or os.path.getsize(args.csv) == 0
+
     written = 0
     stopped_early = False
     with open(args.csv, 'a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
+        if needs_header:
+            writer.writeheader()
         for n, docid in enumerate(missing, 1):
             try:
                 writer.writerow(row_for(docid, key))

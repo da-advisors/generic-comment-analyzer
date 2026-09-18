@@ -158,11 +158,29 @@ instructions:
 # Report Configuration
 # -------------------------------------------------------------------
 report:
-  source_url: "https://github.com/abigailhaddad/generic-comment-analyzer"
+  source_url: "https://github.com/da-advisors/generic-comment-analyzer"
+  # dataindex.us brand palette. The stance trio is a diverging scale (two poles
+  # plus a neutral midpoint) validated for colorblind separation and contrast in
+  # both light and dark; see ../../../brand/tokens.json for the method and the
+  # recorded check results. Support is brand blue rather than the usual green:
+  # red/green is the worst possible pair for colorblind readers, and on a
+  # politically charged docket a red/blue oppose/support axis in the intuitive
+  # direction would read as partisan coding that the data does not support.
   colors:
-    accent: "#1B3A5C"
-    support: "#2D6A4F"
+    bg: "#F5F5F5"
+    surface: "#FFFFFF"
+    text: "#0E0E0E"
+    text_muted: "#787878"
+    accent: "#1A3952"
+    accent_hover: "#2C608A"
+    highlight: "#D4AF37"
+    border: "#DEDEDE"
+    code_bg: "#1A3952"
+    error: "#C0392B"
     oppose: "#C0392B"
+    support: "#1881E2"
+    unclear: "#8A8F98"
+    mixed: "#8A8F98"
 
 state:
   bucket: "regulations-comments"
