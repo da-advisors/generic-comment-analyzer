@@ -1,0 +1,238 @@
+# Analyzer Configuration - Census Bureau Regulation for Decennial Census
+# Docket: USBC-2026-0628 | RIN: 0607-AA75 | 15 CFR Parts 60 and 70
+
+regulation_name: "Decennial Census Residence Criteria and Demographic Question Restrictions"
+regulation_description: >
+  Proposed Department of Commerce / Census Bureau rule establishing 15 CFR Part 60 (Residence
+  Criteria for the Decennial Census of the American Population) and 15 CFR Part 70 (Restrictions
+  on the Inclusion of Certain Demographic Questions in the Decennial Census Operation).
+
+# -------------------------------------------------------------------
+# Positions & Concerns
+# -------------------------------------------------------------------
+stances:
+  - name: "Position: Oppose the proposed rule"
+    indicator: "Explicitly opposes, objects to, disagrees with, or urges withdrawal of the proposed rule (either Part 60, Part 70, or both)"
+
+  - name: "Position: Support the proposed rule"
+    indicator: >
+      Endorses THIS RULE or a named provision of it. NOT its abstract goals: generic complaints
+      about immigration, crime, or government spending do not constitute support unless the comment
+      explicitly backs adopting 15 CFR Part 60 or Part 70. Asking to revise or reconsider any part
+      of the rule is not support.
+
+  - name: "Concern: Part 60 excludes undocumented immigrants"
+    indicator: "Argues Article I Section 2 or 14th Amendment requires counting the whole number of persons regardless of legal status."
+
+  - name: "Concern: Administrative or tax records linkage"
+    indicator: "Objects to using IRS, DHS, state, or commercial data linkage to assess legal status."
+
+  - name: "Concern: Jan 3 to April 1 enumeration window"
+    indicator: "Objects to defining usual residence based on an 88-day residency window."
+
+  - name: "Concern: Part 70 removes race and ethnicity questions"
+    indicator: "Objects to removing race and ethnicity questions; argues data are essential for enforcing Voting Rights Act."
+
+  - name: "Concern: Restrictions on sexual orientation data"
+    indicator: "Objects to prohibiting questions on sexual orientation or restricting demographic questions solely to biological sex."
+
+  - name: "Concern: Disclosure avoidance and differential privacy"
+    indicator: "Discusses restrictions on noise infusion, differential privacy, or Title 13 Section 9 confidentiality obligations."
+
+# -------------------------------------------------------------------
+# Entity Types
+# -------------------------------------------------------------------
+entity_types:
+  - "Individual/Other"
+  - "Demographer / Statistician"
+  - "State or Local Government"
+  - "Tribal Government / Native Organization"
+  - "Civil Rights / Advocacy Organization"
+  - "University / Research Institution"
+  - "Scientific / Professional Association"
+  - "Elected Official"
+  - "Industry / Business"
+
+entity_classification_rules: >
+  Default to Individual/Other UNLESS the commenter explicitly self-identifies IN THE COMMENT TEXT.
+  The submitter name or organization field alone is NOT sufficient evidence.
+
+# -------------------------------------------------------------------
+# Additional Fields Extracted
+# -------------------------------------------------------------------
+additional_fields:
+  entity_name: >
+    Extract a VERBATIM quote from the text that justifies the entity type classification.
+    Leave empty if no identifying information.
+  state: >
+    If the submitter's US state can be identified from any clue in the text, provide the
+    two-letter abbreviation. Leave empty if no state can be determined.
+  political_affiliation: >
+    ONLY if the submitter explicitly self-identifies their political party. Do NOT infer
+    from policy positions. Leave empty if no explicit self-identification.
+  key_quote: >
+    The most important verbatim quote (max 100 words) capturing the essence of the comment.
+  rationale: >
+    Brief explanation (1-2 sentences) of the classification selections.
+
+# -------------------------------------------------------------------
+# Fields
+# -------------------------------------------------------------------
+fields:
+  - name: stances
+    type: multi_enum
+    options_from: stances
+    label: "Position & Concerns"
+    prompt: "Select ALL positions and concerns that apply from the list below (0 or more; exact matches only)."
+    show: [cards, column, filter]
+
+  - name: entity_type
+    type: single_enum
+    options_from: entity_types
+    label: "Entity Type"
+    prompt: "What type of entity is submitting this comment? Choose exactly one from the list below."
+    show: [cards, column, filter]
+
+  - name: entity_name
+    type: quote
+    justifies: entity_type
+    label: "Identified As"
+    prompt: "Extract a VERBATIM quote from the text that justifies the entity type classification. Leave empty if none."
+    show: [modal]
+
+  - name: state_identified
+    type: text
+    label: "State"
+    prompt: "If the submitter's US state can be identified, provide the two-letter abbreviation (e.g. CA, TX). Leave empty if none."
+    show: []
+
+  - name: state_quote
+    type: quote
+    justifies: state_identified
+    label: "State Quote"
+    prompt: "Verbatim quote from the text justifying the state identification. Leave empty if no state identified."
+    show: []
+
+  - name: political_affiliation
+    type: enum_or_empty
+    options: ["Republican", "Democrat", "Independent", "Libertarian"]
+    label: "Political"
+    prompt: "ONLY if the submitter explicitly self-identifies their political party. Do NOT infer. Leave empty if none."
+    show: []
+
+  - name: political_affiliation_quote
+    type: quote
+    justifies: political_affiliation
+    label: "Political Quote"
+    prompt: "Verbatim quote where the submitter self-identifies their political affiliation. Leave empty if none."
+    show: []
+
+  - name: key_quote
+    type: text
+    label: "Key Quote"
+    prompt: "The most important verbatim quote (max 100 words) capturing the essence of the comment."
+    show: [modal]
+
+  - name: rationale
+    type: text
+    label: "Rationale"
+    prompt: "Brief explanation (1-2 sentences) of the classification selections."
+    show: [modal]
+
+  - name: sections_referenced
+    source: regex
+    type: multi_value
+    pattern: '\b(?:60|70)\.\d{1,2}\b'
+    label: "CFR Section"
+    show: [section, filter]
+
+# -------------------------------------------------------------------
+# General Instructions
+# -------------------------------------------------------------------
+instructions:
+  - "A comment may express multiple concerns or no clear position."
+  - "Only select items clearly expressed in the comment."
+  - "Be objective and avoid inserting personal opinions."
+
+# -------------------------------------------------------------------
+# Report Configuration
+# -------------------------------------------------------------------
+report:
+  source_url: "https://github.com/abigailhaddad/generic-comment-analyzer"
+  colors:
+    accent: "#1B3A5C"
+    support: "#2D6A4F"
+    oppose: "#C0392B"
+
+state:
+  bucket: "regulations-comments"
+
+campaigns:
+  min_chars: 100
+
+# -------------------------------------------------------------------
+# Regex Flags
+# -------------------------------------------------------------------
+regex_flags:
+  mentions_apportionment:
+    label: "Apportionment"
+    description: "References Article I, 14th Amendment, or apportionment"
+    patterns:
+      - 'apportionment'
+      - 'Article\s+I'
+      - '14th\s+Amendment'
+  mentions_vra:
+    label: "Voting Rights Act"
+    description: "References the Voting Rights Act or redistricting"
+    patterns:
+      - 'Voting\s+Rights\s+Act'
+      - '\bVRA\b'
+      - 'redistricting'
+
+# -------------------------------------------------------------------
+# Second-Pass Verification
+# -------------------------------------------------------------------
+second_pass:
+  model: "gemini/gemini-3.6-flash"
+  max_workers: 8
+
+  stance:
+    trigger_stances:
+      - "Support"
+      - "Unclear"
+    also_verify_short_oppose: false
+    short_threshold_chars: 200
+
+  entity_type:
+    trigger_types:
+      - "University / Research Institution"
+      - "Scientific / Professional Association"
+      - "Civil Rights / Advocacy Organization"
+      - "Industry / Business"
+      - "Elected Official"
+    verify_attorney_on_quote_mismatch: true
+
+  state:
+    verify_all: false
+
+  political_affiliation:
+    verify_all: false
+
+  prompts:
+    stance: >
+      You are reviewing a public comment about a proposed Census Bureau rule (15 CFR Parts 60 and 70).
+      Classify the comment's overall position as exactly one of: "Oppose", "Support", or "Unclear".
+      - "Oppose": Opposes the rule, objects to excluding undocumented immigrants, or objects to removing race/ethnicity questions.
+      - "Support": Endorses THIS RULE or its specific provisions.
+      - "Unclear": States no clear position on the regulatory text, is purely procedural, or is ambiguous.
+
+    entity: >
+      You are reviewing the entity type classification of a public comment submitter.
+      The initial classification was: {entity_type}
+      The evidence cited was: "{entity_name}"
+      Require EXPLICIT SELF-IDENTIFICATION in the comment text. If you cannot point to a specific
+      phrase where they identify their role, classify as Individual/Other.
+
+rule_text:
+  federal_register_document: "2026-18481"
+  part: "60"
