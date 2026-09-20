@@ -102,3 +102,6 @@ CLAUDE.md
 
 # Playwright MCP scratch output from browser-testing the report.
 .playwright-mcp/
+
+# Second-pass verification cache (local, regenerable, keyed on model+prompt+text)
+.verification_checkpoint.jsonl

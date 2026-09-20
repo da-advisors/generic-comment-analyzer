@@ -13,11 +13,13 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
+import threading
 from collections import Counter
 from typing import List, Dict, Any
 
@@ -623,6 +625,61 @@ def find_political_verify_comments(comments: List[Dict[str, Any]], config: dict)
     return candidates
 
 
+VERIFICATION_CACHE_FILE = '.verification_checkpoint.jsonl'
+
+_cache = {}
+_cache_lock = threading.Lock()
+_cache_loaded = False
+_cache_stats = {'hit': 0, 'miss': 0}
+
+
+def _cache_key(model, system_prompt, user_prompt, schema_name):
+    """Identity of one verification call.
+
+    Everything that can change the verdict is in the key: the model, the prompt
+    (so editing second_pass.prompts in the config invalidates every cached row
+    that used the old wording), the exact comment text sent, and the response
+    schema (so adding an entity type invalidates entity verdicts but not stance
+    ones). Anything not in the key must not be able to change the answer.
+    """
+    h = hashlib.sha256()
+    for part in (model, system_prompt, user_prompt, schema_name):
+        h.update((part or '').encode('utf-8'))
+        h.update(b'\x00')
+    return h.hexdigest()
+
+
+def load_verification_cache(path=VERIFICATION_CACHE_FILE):
+    """Read prior verdicts. Called once, single-threaded, before the pools start."""
+    global _cache_loaded
+    _cache.clear()
+    _cache_stats.update({'hit': 0, 'miss': 0})
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # a torn final line from an interrupted run
+                if e.get('k') and e.get('v') is not None:
+                    _cache[e['k']] = e['v']
+        logger.info(f"Loaded {len(_cache):,} cached verdicts from {path}")
+    _cache_loaded = True
+    return _cache
+
+
+def _cache_put(key, value, path=VERIFICATION_CACHE_FILE):
+    """Append-only, so an interrupted run keeps everything it already paid for."""
+    with _cache_lock:
+        _cache[key] = value
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'k': key, 'v': value}) + '\n')
+
+
+def cache_stats():
+    return dict(_cache_stats)
+
+
 _ANTHROPIC_CLIENT = None
 
 
@@ -643,6 +700,21 @@ def _complete(model, system_prompt, user_prompt, response_model):
     """
     global _ANTHROPIC_CLIENT
 
+    key = _cache_key(model, system_prompt, user_prompt, response_model.__name__)
+    if _cache_loaded:
+        hit = _cache.get(key)
+        if hit is not None:
+            with _cache_lock:
+                _cache_stats['hit'] += 1
+            return dict(hit)
+        with _cache_lock:
+            _cache_stats['miss'] += 1
+
+    def _remember(result):
+        if _cache_loaded:
+            _cache_put(key, result)
+        return result
+
     if not _is_anthropic(model):
         resp = litellm.completion(
             model=model,
@@ -653,7 +725,7 @@ def _complete(model, system_prompt, user_prompt, response_model):
             response_format=response_model,
             temperature=0.0,
         )
-        return json.loads(resp.choices[0].message.content)
+        return _remember(json.loads(resp.choices[0].message.content))
 
     import anthropic
     if _ANTHROPIC_CLIENT is None:
@@ -676,7 +748,7 @@ def _complete(model, system_prompt, user_prompt, response_model):
                   if b.type == 'tool_use' and b.name == 'record_verification'), None)
     if block is None:
         raise ValueError(f"no tool_use block returned (stop_reason={msg.stop_reason})")
-    return dict(block.input)
+    return _remember(dict(block.input))
 
 
 def verify_single_political(model, comment_text, affiliation, quote, submitter=''):
@@ -774,8 +846,17 @@ def verify_single_cosigner_span(model, comment_text, submitter='', organization=
 
 
 def verify_stances(comments: List[Dict[str, Any]], model: str = None,
-                   max_workers: int = None) -> List[Dict[str, Any]]:
-    """Run second-pass verification on stances and entity types. Modifies comments in place."""
+                   max_workers: int = None, use_cache: bool = True) -> List[Dict[str, Any]]:
+    """Run second-pass verification on stances and entity types. Modifies comments in place.
+
+    Verdicts are cached on disk. The trigger functions already skip comments that
+    carry a `verified_stance`, so an incremental refresh is cheap on its own; this
+    cache covers the cases that skip cannot see -- a parquet rebuilt from scratch,
+    a re-run that writes to a different --output, an interrupted run resumed, or a
+    verdict wanted again after the analysis fields were regenerated. A verdict
+    depends only on the model, the prompt and the comment text, all of which are in
+    the cache key, so a cached answer is the answer the model would give again.
+    """
     _load_prompts()
 
     config = load_second_pass_config()
@@ -791,6 +872,11 @@ def verify_stances(comments: List[Dict[str, Any]], model: str = None,
         logger.warning(f"No {needed} — skipping verification for model {model}")
         return comments
     max_workers = max_workers or config.get('max_workers', 8)
+
+    if use_cache:
+        load_verification_cache()
+    else:
+        logger.info("Verification cache disabled — every call will hit the API")
 
     # --- Stance verification ---
     ambiguous = find_ambiguous_comments(comments, config)
@@ -1089,6 +1175,13 @@ def verify_stances(comments: List[Dict[str, Any]], model: str = None,
         log_df.to_csv(log_path, index=False)
         logger.info(f"Saved verification log to {log_path} ({len(log_entries)} entries)")
 
+    if use_cache:
+        st = cache_stats()
+        total = st['hit'] + st['miss']
+        if total:
+            logger.info(f"Cache: {st['hit']:,} reused, {st['miss']:,} called "
+                        f"({st['hit']/total*100:.0f}% reused)")
+
     return comments
 
 
@@ -1098,6 +1191,11 @@ def main():
     parser.add_argument('--output', help='Output parquet file (default: update in place)')
     parser.add_argument('--model', help='Override model from config')
     parser.add_argument('--workers', type=int, help='Override parallel workers from config')
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Re-verify everything instead of reusing cached verdicts in '
+                             f'{VERIFICATION_CACHE_FILE}. The cache keys on model, prompt and '
+                             'comment text, so it already invalidates itself when any of those '
+                             'change; use this only to re-run identical calls deliberately.')
     args = parser.parse_args()
 
     _load_prompts()
@@ -1106,7 +1204,8 @@ def main():
     df = pd.read_parquet(args.parquet)
     comments = df.to_dict('records')
 
-    comments = verify_stances(comments, model=args.model, max_workers=args.workers)
+    comments = verify_stances(comments, model=args.model, max_workers=args.workers,
+                              use_cache=not args.no_cache)
 
     output = args.output or args.parquet
     logger.info(f"Saving to {output}")
