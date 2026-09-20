@@ -86,6 +86,28 @@ fields:
     prompt: "Select ALL positions and concerns that apply from the list below (0 or more; exact matches only)."
     show: [cards, column, filter]
 
+  - name: procedural
+    type: multi_enum
+    options:
+      - "Requests an extension of the comment period"
+      - "Objects to the rulemaking process or its legal basis"
+      - "Challenges the evidence or analysis supporting the rule"
+    label: "Procedural"
+    prompt: >
+      Select ALL procedural objections the comment makes about HOW this rulemaking is
+      being conducted, as distinct from whether the rule is a good idea (0 or more).
+      "Requests an extension of the comment period": asks for more time to comment, or
+      objects that the comment period is too short.
+      "Objects to the rulemaking process or its legal basis": raises inadequate notice,
+      the Administrative Procedure Act, the Paperwork Reduction Act, OMB information-
+      collection clearance, or argues the Bureau lacks authority to do this by rule.
+      "Challenges the evidence or analysis supporting the rule": argues the Bureau has
+      not justified the change, or attacks the regulatory impact analysis.
+      A comment may raise a procedural objection while taking NO position on the merits;
+      that is common in early organizational filings. Select nothing if the comment only
+      argues about whether the rule is right or wrong.
+    show: [cards, column, filter]
+
   - name: entity_type
     type: single_enum
     options_from: entity_types
@@ -220,6 +242,11 @@ second_pass:
       - "Unclear"
     also_verify_short_oppose: false
     short_threshold_chars: 200
+
+  # NOTE: `procedural` is NOT second-pass verified. verify_stances.py dispatches
+  # on a fixed set of field names (stance, entity_type, state,
+  # political_affiliation, cosigner_span); a `procedural:` block here would be
+  # read by nobody and would falsely imply the field had been re-checked.
 
   entity_type:
     trigger_types:
