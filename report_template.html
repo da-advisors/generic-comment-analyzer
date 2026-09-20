@@ -474,6 +474,39 @@
         </div>
         {% endif %}
 
+        <!-- Generic multi_enum field breakdowns (config `show: [cards]`) -->
+        {% for sec in extra_field_sections %}
+        <div class="section" id="fieldSection_{{ sec.key }}">
+            <h2><i class="fas fa-list-check"></i> {{ sec.label }}</h2>
+            <p style="color: var(--color-text-muted); font-size:0.85rem; margin-bottom:1rem;">
+                {{ "{:,}".format(sec.total) }} comment{{ '' if sec.total == 1 else 's' }} record a
+                {{ sec.label | lower }} value. Bar colour shows the oppose/support split of those
+                comments. Click a row to filter the table.
+            </p>
+            <div class="legend">
+                <span class="legend-item"><span class="legend-swatch" style="background: var(--color-oppose);"></span> Oppose</span>
+                <span class="legend-item"><span class="legend-swatch" style="background: var(--color-support);"></span> Support</span>
+            </div>
+            {% for item in sec['items'] %}
+            {% set pct = (item.count * 100.0 / sec['items'][0].count) | round(1) %}
+            {% set opp = (item.split.Oppose * 100.0 / item.count) | round(0) | int %}
+            {% set sup = (item.split.Support * 100.0 / item.count) | round(0) | int %}
+            <div class="concern-row" style="cursor:pointer;"
+                 data-field="{{ sec.key }}" data-value="{{ item.label | e }}"
+                 title="Filter comments to this value">
+                <div class="concern-label">{{ item.label }}</div>
+                <div class="concern-bar-bg">
+                    <div class="concern-bar-stacked" style="width: {{ pct }}%;">
+                        <div class="seg-oppose" style="width: {{ opp }}%;"></div>
+                        <div class="seg-support" style="width: {{ sup }}%;"></div>
+                    </div>
+                    <span class="concern-count-outside" style="left: {{ (pct + 1) }}%;">{{ "{:,}".format(item.count) }} &middot; {{ opp }}% oppose / {{ sup }}% support</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endfor %}
+
         <!-- Form Letter Campaigns -->
         <div class="section" id="campaignsSection">
             <h2><i class="fas fa-copy"></i> Form Letter Campaigns</h2>
@@ -657,7 +690,7 @@
         const commentDataRaw = window.__ROWS__;
         const COMMENT_FIELDS = ['id', 'date', 'received_date', 'submitter', 'organization', 'entity_type', 'cosigner_count',
             'stances', 'flags', 'state', 'political', 'has_attachment', 'campaign_id', 'campaign_rank',
-            'campaign_size', 'campaign_stance', 'multi_values'];
+            'campaign_size', 'campaign_stance', 'multi_values', 'field_values'];
         const commentData = commentDataRaw.map(function (r) {
             const obj = {};
             COMMENT_FIELDS.forEach(function (name, i) { obj[name] = r[i]; });
@@ -986,6 +1019,21 @@
                 html += '</div>';
             }
 
+            // Outside the stances block on purpose. A comment can carry a generic
+            // field value and no stance at all -- a procedural filing that asks for
+            // more time without arguing the merits is the case this field exists
+            // for -- and nesting this inside `if (c.stances.length)` hid it from
+            // exactly those comments.
+            (({{ extra_multi | tojson }}) || []).forEach(function (name) {
+                var fv = (c.field_values || {})[name] || [];
+                if (!fv.length) return;
+                html += '<div class="detail-label">' + escapeHtml(fieldLabel(name, name)) + '</div><div class="detail-value">';
+                html += fv.map(function (v) {
+                    return '<span class="stance-tag tag-concern">' + escapeHtml(v) + '</span>';
+                }).join(' ');
+                html += '</div>';
+            });
+
             if (c.stances && c.stances.length) {
                 html += '<div class="detail-label">Position &amp; Concerns</div><div class="detail-value">';
                 c.stances.forEach(function(s) { html += '<span class="stance-tag">' + s + '</span> '; });
@@ -1121,6 +1169,31 @@
               cell: function (c) { return escapeHtml(c.political || ''); },
               filter: showsField('political_affiliation', 'filter') ? { name: fieldLabel('political_affiliation', 'Political'), vals: function (c) { return c.political ? [c.political] : []; } } : null },
         ];
+
+        // Any multi_enum field the config declares beyond `stances` gets a column
+        // and a filter from its own metadata. Without this a new field's
+        // `show: [column, filter]` was accepted by the config, carried through
+        // field_meta, and then silently rendered nothing.
+        (({{ extra_multi | tojson }}) || []).forEach(function (name) {
+            function vals(c) {
+                var fv = c.field_values || {};
+                return fv[name] || [];
+            }
+            COLUMN_SPECS.push({
+                key: 'f_' + name,
+                title: fieldLabel(name, name),
+                orderable: false,
+                enabled: showsField(name, 'column'),
+                cell: function (c) {
+                    return vals(c).map(function (v) {
+                        return '<span class="stance-tag tag-concern">' + escapeHtml(v) + '</span>';
+                    }).join(' ');
+                },
+                filter: showsField(name, 'filter')
+                    ? { name: fieldLabel(name, name), vals: vals } : null
+            });
+        });
+
         const COLUMNS = COLUMN_SPECS.filter(function (col) { return col.enabled !== false; });
 
         // Filter definitions = enabled column filters + campaign-stance + comment-text + config flags.
@@ -1650,6 +1723,14 @@
             // Clickable concern bars -> filter the table to that concern.
             document.querySelectorAll('#concernsSection .concern-row[data-concern]').forEach(function (row) {
                 row.addEventListener('click', function () { Report.filterToConcern(this.getAttribute('data-concern')); });
+            });
+            // Clickable generic-field bars -> filter the table to that value. The
+            // filter key matches the column key those specs were pushed with.
+            document.querySelectorAll('.concern-row[data-field]').forEach(function (row) {
+                row.addEventListener('click', function () {
+                    Report.filterToValue('f_' + this.getAttribute('data-field'),
+                                         this.getAttribute('data-value'));
+                });
             });
             // Clickable Sections-Referenced bars -> filter the table to that value.
             document.querySelectorAll('.value-row[data-section-key]').forEach(function (row) {

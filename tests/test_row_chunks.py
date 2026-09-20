@@ -162,3 +162,70 @@ def test_missing_optional_campaign_fields_do_not_raise(tmp_path):
     # column earlier in the row shifted them silently.
     by_name = dict(zip(template_fields(), got[0]))
     assert by_name['campaign_id'] is None and by_name['campaign_size'] == 0
+
+
+# --- generic multi_enum fields ---------------------------------------------
+#
+# A config can declare a multi_enum field beyond `stances`. Before these, such a
+# field was accepted by the config, carried through field_meta, and then rendered
+# nothing: no column spec read it and prepare_rows never carried its values. The
+# failure was silent in both directions -- the page looked fine and the field
+# looked empty -- so it is worth pinning.
+
+def test_extra_multi_enum_fields_are_detected():
+    from generate_report import extra_multi_enum_fields
+    meta = {
+        'stances': {'type': 'multi_enum', 'show': ['column']},
+        'procedural': {'type': 'multi_enum', 'show': ['column', 'filter']},
+        'entity_type': {'type': 'single_enum', 'show': ['column']},
+        'key_quote': {'type': 'text', 'show': ['modal']},
+    }
+    # `stances` has bespoke handling everywhere and must not be double-rendered.
+    assert extra_multi_enum_fields(meta) == ['procedural']
+
+
+def test_extra_multi_enum_values_reach_the_row(tmp_path):
+    """The values must survive prepare_rows -> _row_to_list -> the chunk file."""
+    from generate_report import prepare_rows
+    comments = [{
+        'id': 'DOC-1', 'date': '2026-01-05', 'received_date': '2026-01-01',
+        'submitter': 'S', 'organization': '', 'comment_text': 'x',
+        'analysis': {'entity_type': 'Individual/Other', 'stances': [],
+                     'procedural': ['Requests an extension of the comment period']},
+    }]
+    rows = prepare_rows(comments, extra_multi_fields=['procedural'])
+    assert rows[0]['field_values'] == {
+        'procedural': ['Requests an extension of the comment period']}
+
+    write_row_chunks(rows, str(tmp_path))
+    row, _ = read_chunks(str(tmp_path))
+    by_name = dict(zip(template_fields(), row[0]))
+    assert by_name['field_values'] == {
+        'procedural': ['Requests an extension of the comment period']}
+
+
+def test_a_comment_with_no_stances_still_carries_its_field_values(tmp_path):
+    """The case the field exists for.
+
+    A purely procedural filing -- asking for more time without arguing the merits
+    -- has no stances at all. An earlier version rendered these values only inside
+    the stances block, which hid them from exactly those comments.
+    """
+    from generate_report import prepare_rows
+    comments = [{
+        'id': 'DOC-2', 'date': '', 'received_date': '', 'submitter': '',
+        'organization': '', 'comment_text': 'x',
+        'analysis': {'entity_type': 'Individual/Other', 'stances': [],
+                     'procedural': ['Objects to the rulemaking process or its legal basis']},
+    }]
+    rows = prepare_rows(comments, extra_multi_fields=['procedural'])
+    assert rows[0]['stances_list'] == []
+    assert rows[0]['field_values']['procedural']
+
+    html = open(TEMPLATE, encoding='utf-8').read()
+    # The modal's generic-field loop must not be nested in the stances block.
+    stances_block = html.index("if (c.stances && c.stances.length) {")
+    generic_loop = html.index("var fv = (c.field_values || {})[name] || [];")
+    assert generic_loop < stances_block, (
+        'the generic field loop is inside the stances conditional; comments with '
+        'no stance would not show their field values')

@@ -451,7 +451,16 @@ def _safe_int(val):
         return None
 
 
-def prepare_rows(comments: List[Dict[str, Any]], campaign_id_to_rank: dict = None, flag_keys: List[str] = None, campaign_id_to_stance: dict = None, regex_value_patterns: dict = None) -> List[Dict[str, Any]]:
+def _as_str_list(value) -> List[str]:
+    """Parquet hands list columns back as numpy arrays; normalise to [str]."""
+    if hasattr(value, 'tolist'):
+        value = value.tolist()
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if v is not None and str(v) != '']
+
+
+def prepare_rows(comments: List[Dict[str, Any]], campaign_id_to_rank: dict = None, flag_keys: List[str] = None, campaign_id_to_stance: dict = None, regex_value_patterns: dict = None, extra_multi_fields: List[str] = None) -> List[Dict[str, Any]]:
     """Prepare comment data for table rows and modal detail.
 
     One row per submission. The table used to collapse identical texts, which made
@@ -551,6 +560,11 @@ def prepare_rows(comments: List[Dict[str, Any]], campaign_id_to_rank: dict = Non
             'campaign_size': _safe_int(comment.get('campaign_size')),
             'campaign_stance': campaign_id_to_stance.get(_safe_int(comment.get('campaign_id'))) or '',
             'multi_values': {name: extract_regex_values(comment.get('comment_text', '') or '', pat) for name, pat in regex_value_patterns.items()},
+            # Generic multi_enum fields (anything the config declares beyond
+            # `stances`). Empty list, never null, so the frontend can treat the
+            # key as always present.
+            'field_values': {name: _as_str_list(analysis.get(name))
+                             for name in (extra_multi_fields or ())},
         })
     return rows
 
@@ -678,6 +692,58 @@ def load_fields() -> List[Dict[str, Any]]:
         fld['show'] = list(fld.get('show', []) or [])
         out.append(fld)
     return out
+
+
+def extra_multi_enum_fields(field_meta: Dict[str, Dict[str, Any]]) -> List[str]:
+    """multi_enum fields the report has no bespoke handling for.
+
+    `stances` is special-cased throughout (split into Position/Concern tags, the
+    stance cards, the per-concern breakdown). Any OTHER multi_enum a config
+    declares had no path to the page at all: compute_field_meta passed its
+    metadata through, but no column spec read it and prepare_rows never carried
+    its values, so `show: [cards, column, filter]` silently did nothing. These
+    are rendered generically.
+    """
+    return [name for name, m in (field_meta or {}).items()
+            if m.get('type') == 'multi_enum' and name != 'stances']
+
+
+def compute_extra_field_sections(comments, field_meta):
+    """Per-value counts, with the position split, for each generic multi_enum field."""
+    names = extra_multi_enum_fields(field_meta)
+    if not names:
+        return []
+    sections = []
+    for name in names:
+        meta = field_meta[name]
+        if 'cards' not in meta.get('show', []):
+            continue
+        counts, split = {}, {}
+        n_any = 0
+        for c in comments:
+            analysis = c.get('analysis') or {}
+            vals = analysis.get(name)
+            if hasattr(vals, 'tolist'):
+                vals = vals.tolist()
+            if not isinstance(vals, list) or not vals:
+                continue
+            n_any += 1
+            pos = comment_position(c)
+            for v in vals:
+                v = str(v)
+                counts[v] = counts.get(v, 0) + 1
+                sp = split.setdefault(v, {'Oppose': 0, 'Support': 0, 'Unclear': 0})
+                sp[pos] = sp.get(pos, 0) + 1
+        if not counts:
+            continue
+        sections.append({
+            'key': name,
+            'label': meta.get('label', name),
+            'total': n_any,
+            'items': [{'label': k, 'count': v, 'split': split[k]}
+                      for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+        })
+    return sections
 
 
 def compute_field_meta(fields, report_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -860,6 +926,9 @@ def _row_to_list(r):
         r.get('campaign_size') if r.get('campaign_size') is not None else 0,
         r['campaign_stance'],
         r['multi_values'],
+        # Appended, never inserted: the decoder maps by position, so adding a
+        # field anywhere but the end shifts every column after it.
+        r.get('field_values') or {},
     ]
 
 
@@ -1348,6 +1417,8 @@ def generate_html(comments: List[Dict[str, Any]], stats: Dict[str, Any], field_a
     field_meta = compute_field_meta(fields, report_config)
     show_stance_cards = 'cards' in field_meta.get('stances', {}).get('show', [])
     show_entity_cards = 'cards' in field_meta.get('entity_type', {}).get('show', [])
+    extra_multi = extra_multi_enum_fields(field_meta)
+    extra_field_sections = compute_extra_field_sections(comments, field_meta)
     value_sections, regex_value_patterns = compute_value_sections(comments, fields)
     briefing = compute_briefing(comments)
     briefing['flag_sections'] = compute_flag_sections(comments, flags_cfg)
@@ -1359,6 +1430,7 @@ def generate_html(comments: List[Dict[str, Any]], stats: Dict[str, Any], field_a
         flag_keys=flag_keys,
         campaign_id_to_stance=briefing.get('campaign_id_to_stance', {}),
         regex_value_patterns=regex_value_patterns,
+        extra_multi_fields=extra_multi,
     )
     regex_patterns = load_regex_flag_patterns()
     show_cosigners = any(r.get('cosigner_count', 1) > 1 for r in rows)
@@ -1397,6 +1469,8 @@ def generate_html(comments: List[Dict[str, Any]], stats: Dict[str, Any], field_a
         regex_patterns=regex_patterns,
         flag_meta=flag_meta,
         field_meta=field_meta,
+        extra_multi=extra_multi,
+        extra_field_sections=extra_field_sections,
         value_sections=value_sections,
         colors=colors,
         accent_rgb=accent_rgb,
